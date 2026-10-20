@@ -1,6 +1,33 @@
-# Multi-Container Runtime — OS Jackfruit
+# Multi-Container Runtime: a Linux container engine in C
 
-## 1. Team Information
+A lightweight container runtime written in C for the Operating Systems course at PES University (team of 2). A long-running supervisor runs several isolated containers at once, a loadable kernel module enforces their memory limits, and a small CLI talks to the supervisor over a UNIX domain socket.
+
+## Highlights
+
+- **Isolation:** each container is started with `clone()` in new PID, UTS and mount namespaces, gets its own hostname and `/proc`, and is `chroot`ed into an Alpine Linux root filesystem.
+- **Supervisor:** keeps a mutex-protected table of container metadata, reaps exited children from a `SIGCHLD` handler so no zombies are left, and shuts down cleanly (`SIGTERM`, then `SIGKILL` after 2 s).
+- **CLI over IPC:** the `start`, `ps`, `logs` and `stop` commands reach the supervisor over a UNIX domain socket.
+- **Logging pipeline:** container stdout and stderr flow through pipes into a bounded buffer (a mutex and two condition variables), which a logger thread drains into per-container log files.
+- **Kernel memory monitor:** `monitor.ko`, registered through `ioctl`, checks each container's RSS every second. It logs a warning at the soft limit and sends `SIGKILL` at the hard limit.
+- **Scheduler experiments:** two CPU-bound containers at nice −5 and +5 finished the same 10 s of work in about 10 s and 15 s, roughly a 60/40 CPU split under CFS.
+
+## Architecture
+
+```text
+CLI: engine start | ps | logs | stop
+        │  UNIX domain socket
+        ▼
+engine supervisor ── container table (mutex), SIGCHLD reaper
+        │  clone(): new PID, UTS and mount namespaces, chroot into the Alpine rootfs
+        ▼
+containers ── stdout/stderr ─► pipes ─► producer threads ─► bounded buffer ─► logger thread ─► logs/<id>.log
+        │
+        │  ioctl: register the PID with soft and hard memory limits
+        ▼
+monitor.ko (kernel) ── checks RSS every second: soft limit → dmesg warning, hard limit → SIGKILL
+```
+
+## Team
 
 | Name | SRN |
 |------|-----|
@@ -9,7 +36,7 @@
 
 ---
 
-## 2. Build, Load, and Run Instructions
+## Build, Load and Run
 
 ### Prerequisites
 ```bash
@@ -103,36 +130,36 @@ sudo dmesg | tail -5
 
 ---
 
-## 3. Demo Screenshots
+## Demo Screenshots
 
 ### Screenshot 1 — Multi-Container Supervision
-![Demo 1](1.jpeg)
+![Demo 1](screenshots/1.jpeg)
 
 ### Screenshot 2 — Metadata Tracking
-![Demo 2](2.jpeg)
+![Demo 2](screenshots/2.jpeg)
 
 ### Screenshot 3 — Bounded-Buffer Logging
-![Demo 3](3.jpeg)
+![Demo 3](screenshots/3.jpeg)
 
 ### Screenshot 4 — CLI and IPC
-![Demo 4](4.jpeg)
+![Demo 4](screenshots/4.jpeg)
 
 ### Screenshot 5 — Kernel Module Loaded
-![Demo 5](5.jpeg)
+![Demo 5](screenshots/5.jpeg)
 
 ### Screenshot 6 — Container Registration and Monitoring
-![Demo 6](6.jpeg)
+![Demo 6](screenshots/6.jpeg)
 
 ### Screenshot 7 — Scheduling Experiment
-![Demo 7.1](7.1.jpeg)
-![Demo 7.2](7.2.jpeg)
+![Demo 7.1](screenshots/7.1.jpeg)
+![Demo 7.2](screenshots/7.2.jpeg)
 
 ### Screenshot 8 — Clean Teardown
-![Demo 8](8.jpeg)
+![Demo 8](screenshots/8.jpeg)
 
-## 4. Engineering Analysis
+## Engineering Analysis
 
-### 4.1 Isolation Mechanisms
+### Isolation Mechanisms
 
 Our runtime uses three Linux namespace flags passed to `clone()`:
 
@@ -144,7 +171,7 @@ At the kernel level, namespaces work by giving each process a pointer to a names
 
 The host kernel still shares the underlying hardware, scheduling queues, network stack (we do not use `CLONE_NEWNET`), and the same physical memory. The containers are isolated in naming and visibility, not in resource access — which is why the kernel memory monitor (`monitor.c`) must run in kernel space to enforce limits across namespace boundaries.
 
-### 4.2 Supervisor and Process Lifecycle
+### Supervisor and Process Lifecycle
 
 A long-running supervisor is necessary because container metadata (PID, state, log path, memory limits) must persist across the container's lifecycle and be accessible to CLI commands issued later. If the supervisor exited after each launch, there would be no process to reap children (causing zombies), no place to store metadata, and no IPC endpoint for the CLI.
 
@@ -156,7 +183,7 @@ Metadata tracking: The `container_record_t` linked list is protected by `pthread
 
 Signal delivery: `SIGINT`/`SIGTERM` to the supervisor set `g_should_stop = 1`, which causes the event loop to exit. The shutdown sequence sends `SIGTERM` to all running containers, waits 2 seconds, then sends `SIGKILL` to any that remain, and finally calls `waitpid()` to reap all of them.
 
-### 4.3 IPC, Threads, and Synchronization
+### IPC, Threads, and Synchronization
 
 Our project uses two distinct IPC mechanisms:
 
@@ -173,7 +200,7 @@ Without the mutex, two producers could simultaneously read `tail`, both write to
 **IPC 2 — UNIX domain socket (CLI control plane):**
 The supervisor binds a `SOCK_STREAM` socket at `/tmp/mini_runtime.sock`. CLI commands (`start`, `stop`, `ps`, `logs`) connect, send a `control_request_t` struct, and read back a `control_response_t`. This is separate from the log pipe because mixing control messages and log data in one channel would require framing and demultiplexing — two channels keeps the design clean.
 
-### 4.4 Memory Management and Enforcement
+### Memory Management and Enforcement
 
 RSS (Resident Set Size) measures the number of physical memory pages currently mapped into a process's address space. It does not measure:
 - Pages that have been swapped out
@@ -189,7 +216,7 @@ This is why `memory_hog.c` uses `memset()` after each `malloc()` — to actually
 **Why kernel space?**
 User-space enforcement would require the supervisor to periodically read `/proc/<pid>/status` and parse the `VmRSS` field. This has two problems: (1) it is racy — the process could exceed the limit and allocate more memory between checks; (2) it requires the supervisor to have permission to read every container's `/proc` entry across PID namespace boundaries. The kernel monitor runs in the same context as the memory allocator and can check RSS atomically, making enforcement more reliable and timely.
 
-### 4.5 Scheduling Behavior
+### Scheduling Behavior
 
 We ran two experiments:
 
@@ -201,7 +228,7 @@ Two `cpu_hog` containers ran simultaneously for 10 seconds. The `high` container
 
 ---
 
-## 5. Design Decisions and Tradeoffs
+## Design Decisions and Tradeoffs
 
 ### Namespace Isolation
 **Choice:** `chroot` instead of `pivot_root` for filesystem isolation.
@@ -230,7 +257,7 @@ Two `cpu_hog` containers ran simultaneously for 10 seconds. The `high` container
 
 ---
 
-## 6. Scheduler Experiment Results
+## Scheduler Experiment Results
 
 ### Experiment 1 — Two CPU-bound Containers, Different Priorities
 

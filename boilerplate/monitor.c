@@ -8,7 +8,7 @@
  *   - soft-limit and hard-limit event helpers
  *   - ioctl dispatch shell
  *
- * YOUR WORK: Fill in all sections marked // TODO.
+ * The sections marked "Part N" below were implemented for this project.
  */
 
 #include <linux/cdev.h>
@@ -32,7 +32,7 @@
 #define CHECK_INTERVAL_SEC 1
 
 /* ==============================================================
- * TODO 1: Linked-list node struct.
+ * Part 1: Linked-list node struct.
  * Tracks PID, container ID, limits, and soft-limit warning state.
  * ============================================================== */
 struct monitored_entry {
@@ -46,7 +46,7 @@ struct monitored_entry {
 
 
 /* ==============================================================
- * TODO 2: Global monitored list and lock.
+ * Part 2: Global monitored list and lock.
  *
  * We use a mutex (not a spinlock) because the timer callback and
  * ioctl handler both run in sleepable contexts (timer runs in
@@ -142,7 +142,7 @@ static void timer_callback(struct timer_list *t)
     long rss;
 
     /*
-     * TODO 3: Periodic monitoring.
+     * Part 3: Periodic monitoring.
      *
      * Use list_for_each_entry_safe so we can delete entries
      * while iterating without use-after-free.
@@ -212,7 +212,7 @@ static long monitor_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
                req.container_id, req.pid, req.soft_limit_bytes, req.hard_limit_bytes);
 
         /* ==============================================================
-         * TODO 4: Add a monitored entry.
+         * Part 4: Add a monitored entry.
          * ============================================================== */
         if (req.soft_limit_bytes > 0 &&
             req.hard_limit_bytes > 0 &&
@@ -251,7 +251,7 @@ static long monitor_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
            req.container_id, req.pid);
 
     /* ==============================================================
-     * TODO 5: Remove a monitored entry on explicit unregister.
+     * Part 5: Remove a monitored entry on explicit unregister.
      * ============================================================== */
     {
         struct monitored_entry *entry, *tmp;
@@ -326,7 +326,7 @@ static void __exit monitor_exit(void)
     del_timer_sync(&monitor_timer);
 
     /* ==============================================================
-     * TODO 6: Free all remaining monitored entries.
+     * Part 6: Free all remaining monitored entries.
      * ============================================================== */
     {
         struct monitored_entry *entry, *tmp;

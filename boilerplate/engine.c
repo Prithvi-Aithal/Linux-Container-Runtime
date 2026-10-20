@@ -279,7 +279,7 @@ static void bounded_buffer_begin_shutdown(bounded_buffer_t *buffer)
 }
 
 /*
- * TODO:
+ * Task:
  * Implement producer-side insertion into the bounded buffer.
  *
  * Requirements:
@@ -313,7 +313,7 @@ int bounded_buffer_push(bounded_buffer_t *buffer, const log_item_t *item)
 }
 
 /*
- * TODO:
+ * Task:
  * Implement consumer-side removal from the bounded buffer.
  *
  * Requirements:
@@ -347,7 +347,7 @@ int bounded_buffer_pop(bounded_buffer_t *buffer, log_item_t *item)
 }
 
 /*
- * TODO:
+ * Task:
  * Implement the logging consumer thread.
  *
  * Suggested responsibilities:
@@ -1117,7 +1117,7 @@ static int cmd_ps(void)
     req.kind = CMD_PS;
 
     /*
-     * TODO:
+     * Task:
      * The supervisor should respond with container metadata.
      * Keep the rendering format simple enough for demos and debugging.
      */
