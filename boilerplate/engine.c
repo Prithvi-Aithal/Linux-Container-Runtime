@@ -128,6 +128,32 @@ typedef struct {
     container_record_t *containers;
 } supervisor_ctx_t;
 
+/* Copy a C string into a fixed-size field, always NUL-terminating it. */
+static void copy_str(char *dst, size_t size, const char *src)
+{
+    size_t len = strnlen(src, size - 1);
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+}
+
+/* Write all n bytes, retrying on short writes and EINTR. Best-effort:
+ * on error the rest is dropped (callers send log lines and replies to a
+ * client that may already have gone away). */
+static void write_all(int fd, const void *buf, size_t n)
+{
+    const char *p = buf;
+    while (n > 0) {
+        ssize_t w = write(fd, p, n);
+        if (w < 0) {
+            if (errno == EINTR)
+                continue;
+            return;
+        }
+        p += w;
+        n -= (size_t)w;
+    }
+}
+
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -446,7 +472,11 @@ int child_fn(void *arg)
     /* ── 3. Mount /proc inside the container ──
      * Without procfs, tools like 'ps' or '/proc/self/status' won't work.
      * We mount at <rootfs>/proc before chroot-ing. */
-    snprintf(proc_path, sizeof(proc_path), "%s/proc", cfg->rootfs);
+    if (snprintf(proc_path, sizeof(proc_path), "%s/proc", cfg->rootfs)
+            >= (int)sizeof(proc_path)) {
+        fprintf(stderr, "rootfs path too long\n");
+        return 1;
+    }
     mkdir(proc_path, 0555);
     if (mount("proc", proc_path, "proc",
               MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL) != 0) {
@@ -485,7 +515,7 @@ int child_fn(void *arg)
     /* ── 7. Exec the command ──
      * Split the command string on spaces to build argv. */
     char cmd_copy[CHILD_COMMAND_LEN];
-    strncpy(cmd_copy, cfg->command, sizeof(cmd_copy) - 1);
+    copy_str(cmd_copy, sizeof(cmd_copy), cfg->command);
     cmd_copy[sizeof(cmd_copy) - 1] = '\0';
 
     char *exec_argv[64];
@@ -519,7 +549,7 @@ int register_with_monitor(int monitor_fd,
     req.pid = host_pid;
     req.soft_limit_bytes = soft_limit_bytes;
     req.hard_limit_bytes = hard_limit_bytes;
-    strncpy(req.container_id, container_id, sizeof(req.container_id) - 1);
+    copy_str(req.container_id, sizeof(req.container_id), container_id);
 
     if (ioctl(monitor_fd, MONITOR_REGISTER, &req) < 0)
         return -1;
@@ -533,7 +563,7 @@ int unregister_from_monitor(int monitor_fd, const char *container_id, pid_t host
 
     memset(&req, 0, sizeof(req));
     req.pid = host_pid;
-    strncpy(req.container_id, container_id, sizeof(req.container_id) - 1);
+    copy_str(req.container_id, sizeof(req.container_id), container_id);
 
     if (ioctl(monitor_fd, MONITOR_UNREGISTER, &req) < 0)
         return -1;
@@ -557,8 +587,7 @@ static void *pipe_producer_thread(void *arg)
     while ((n = read(p->pipe_rd, item.data, sizeof(item.data) - 1)) > 0) {
         item.length = (size_t)n;
         item.data[n] = '\0';
-        strncpy(item.container_id, p->container_id,
-                sizeof(item.container_id) - 1);
+        copy_str(item.container_id, sizeof(item.container_id), p->container_id);
         bounded_buffer_push(p->buffer, &item);
     }
     close(p->pipe_rd);
@@ -625,7 +654,7 @@ static int supervisor_launch_container(supervisor_ctx_t *ctx,
     container_record_t *rec = calloc(1, sizeof(*rec));
     if (!rec) { perror("calloc container_record"); return -1; }
 
-    strncpy(rec->id, req->container_id, sizeof(rec->id) - 1);
+    copy_str(rec->id, sizeof(rec->id), req->container_id);
     rec->started_at       = time(NULL);
     rec->state            = CONTAINER_STARTING;
     rec->soft_limit_bytes = req->soft_limit_bytes;
@@ -649,9 +678,9 @@ static int supervisor_launch_container(supervisor_ctx_t *ctx,
         free(rec);
         return -1;
     }
-    strncpy(cfg->id,      req->container_id, sizeof(cfg->id)      - 1);
-    strncpy(cfg->rootfs,  req->rootfs,       sizeof(cfg->rootfs)  - 1);
-    strncpy(cfg->command, req->command,      sizeof(cfg->command) - 1);
+    copy_str(cfg->id, sizeof(cfg->id), req->container_id);
+    copy_str(cfg->rootfs, sizeof(cfg->rootfs), req->rootfs);
+    copy_str(cfg->command, sizeof(cfg->command), req->command);
     cfg->nice_value   = req->nice_value;
     cfg->log_write_fd = pipefd[1];   /* container writes stdout/stderr here */
 
@@ -715,7 +744,7 @@ static int supervisor_launch_container(supervisor_ctx_t *ctx,
         while ((n = read(pipefd[0], buf, sizeof(buf) - 1)) > 0) {
             buf[n] = '\0';
             int lfd = open(rec->log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-            if (lfd >= 0) { (void)write(lfd, buf, n); close(lfd); }
+            if (lfd >= 0) { write_all(lfd, buf, n); close(lfd); }
         }
         close(pipefd[0]);
 
@@ -746,8 +775,7 @@ static int supervisor_launch_container(supervisor_ctx_t *ctx,
         if (pa) {
             pa->pipe_rd = pipefd[0];
             pa->buffer  = &ctx->log_buffer;
-            strncpy(pa->container_id, req->container_id,
-                    sizeof(pa->container_id) - 1);
+            copy_str(pa->container_id, sizeof(pa->container_id), req->container_id);
             pthread_t prod_tid;
             pthread_create(&prod_tid, NULL, pipe_producer_thread, pa);
             pthread_detach(prod_tid);
@@ -769,7 +797,7 @@ static void supervisor_print_ps(supervisor_ctx_t *ctx, int out_fd)
     n = snprintf(line, sizeof(line),
                  "%-16s %-8s %-12s %-10s %-12s %-12s\n",
                  "ID", "PID", "STATE", "EXIT", "SOFT(MB)", "HARD(MB)");
-    (void)write(out_fd, line, n);
+    write_all(out_fd, line, n);
 
     pthread_mutex_lock(&ctx->metadata_lock);
     container_record_t *c = ctx->containers;
@@ -786,7 +814,7 @@ static void supervisor_print_ps(supervisor_ctx_t *ctx, int out_fd)
                      c->exit_code,
                      c->soft_limit_bytes / (1024 * 1024),
                      c->hard_limit_bytes / (1024 * 1024));
-        write(out_fd, line, n);
+        write_all(out_fd, line, n);
         c = c->next;
     }
     pthread_mutex_unlock(&ctx->metadata_lock);
@@ -825,7 +853,7 @@ static int run_supervisor(const char *rootfs)
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, CONTROL_PATH, sizeof(addr.sun_path) - 1);
+    copy_str(addr.sun_path, sizeof(addr.sun_path), CONTROL_PATH);
 
     if (bind(ctx.server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("bind"); goto cleanup;
@@ -882,7 +910,7 @@ static int run_supervisor(const char *rootfs)
         if (nr != (ssize_t)sizeof(req)) {
             resp.status = -1;
             snprintf(resp.message, sizeof(resp.message), "bad request size");
-            (void)write(cli_fd, &resp, sizeof(resp));
+            write_all(cli_fd, &resp, sizeof(resp));
             close(cli_fd);
             continue;
         }
@@ -906,7 +934,7 @@ static int run_supervisor(const char *rootfs)
         case CMD_PS:
             resp.status = 0;
             snprintf(resp.message, sizeof(resp.message), "ps follows");
-            (void)write(cli_fd, &resp, sizeof(resp));
+            write_all(cli_fd, &resp, sizeof(resp));
             supervisor_print_ps(&ctx, cli_fd);
             close(cli_fd);
             continue;
@@ -941,14 +969,14 @@ static int run_supervisor(const char *rootfs)
                 resp.status = -1;
                 snprintf(resp.message, sizeof(resp.message),
                          "no log for '%s'", req.container_id);
-                (void)write(cli_fd, &resp, sizeof(resp));
+                write_all(cli_fd, &resp, sizeof(resp));
             } else {
                 resp.status = 0;
                 snprintf(resp.message, sizeof(resp.message), "log follows");
-                (void)write(cli_fd, &resp, sizeof(resp));
+                write_all(cli_fd, &resp, sizeof(resp));
                 char buf[4096]; ssize_t n;
                 while ((n = read(lfd, buf, sizeof(buf))) > 0)
-                    (void)write(cli_fd, buf, n);
+                    write_all(cli_fd, buf, n);
                 close(lfd);
             }
             close(cli_fd);
@@ -959,7 +987,7 @@ static int run_supervisor(const char *rootfs)
             snprintf(resp.message, sizeof(resp.message), "unknown command");
         }
 
-        (void)write(cli_fd, &resp, sizeof(resp));
+        write_all(cli_fd, &resp, sizeof(resp));
         close(cli_fd);
     }
 
@@ -1028,7 +1056,7 @@ static int send_control_request(const control_request_t *req)
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, CONTROL_PATH, sizeof(addr.sun_path) - 1);
+    copy_str(addr.sun_path, sizeof(addr.sun_path), CONTROL_PATH);
 
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("connect (is the supervisor running?)");
@@ -1072,9 +1100,9 @@ static int cmd_start(int argc, char *argv[])
 
     memset(&req, 0, sizeof(req));
     req.kind = CMD_START;
-    strncpy(req.container_id, argv[2], sizeof(req.container_id) - 1);
-    strncpy(req.rootfs, argv[3], sizeof(req.rootfs) - 1);
-    strncpy(req.command, argv[4], sizeof(req.command) - 1);
+    copy_str(req.container_id, sizeof(req.container_id), argv[2]);
+    copy_str(req.rootfs, sizeof(req.rootfs), argv[3]);
+    copy_str(req.command, sizeof(req.command), argv[4]);
     req.soft_limit_bytes = DEFAULT_SOFT_LIMIT;
     req.hard_limit_bytes = DEFAULT_HARD_LIMIT;
 
@@ -1097,9 +1125,9 @@ static int cmd_run(int argc, char *argv[])
 
     memset(&req, 0, sizeof(req));
     req.kind = CMD_RUN;
-    strncpy(req.container_id, argv[2], sizeof(req.container_id) - 1);
-    strncpy(req.rootfs, argv[3], sizeof(req.rootfs) - 1);
-    strncpy(req.command, argv[4], sizeof(req.command) - 1);
+    copy_str(req.container_id, sizeof(req.container_id), argv[2]);
+    copy_str(req.rootfs, sizeof(req.rootfs), argv[3]);
+    copy_str(req.command, sizeof(req.command), argv[4]);
     req.soft_limit_bytes = DEFAULT_SOFT_LIMIT;
     req.hard_limit_bytes = DEFAULT_HARD_LIMIT;
 
@@ -1141,7 +1169,7 @@ static int cmd_logs(int argc, char *argv[])
 
     memset(&req, 0, sizeof(req));
     req.kind = CMD_LOGS;
-    strncpy(req.container_id, argv[2], sizeof(req.container_id) - 1);
+    copy_str(req.container_id, sizeof(req.container_id), argv[2]);
 
     return send_control_request(&req);
 }
@@ -1157,7 +1185,7 @@ static int cmd_stop(int argc, char *argv[])
 
     memset(&req, 0, sizeof(req));
     req.kind = CMD_STOP;
-    strncpy(req.container_id, argv[2], sizeof(req.container_id) - 1);
+    copy_str(req.container_id, sizeof(req.container_id), argv[2]);
 
     return send_control_request(&req);
 }
